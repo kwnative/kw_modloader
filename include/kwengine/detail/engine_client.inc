@@ -2,8 +2,8 @@
  * SPDX-License-Identifier: MIT
  */
 /* Bind the optional engine component from the loader's absolute directory.
- * An implicit import from plugins/ would depend on DLL search order or on the
- * AI adapter having loaded it first. This client never embeds a resolver. */
+ * An implicit import from plugins/ would depend on DLL search order or another
+ * plugin having loaded it first. This client never embeds a resolver. */
 #define KWENGINE_CLIENT_FUNCTIONS(X)                                                                                                                 \
     X(resolve, int, (const void *, size_t, struct kwengine_resolution *))                                                                            \
     X(va, uintptr_t, (uintptr_t))                                                                                                                    \

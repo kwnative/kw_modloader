@@ -12,10 +12,14 @@ See [release licensing](docs/RELEASING.md) for matching-source distribution and
 
 `KWMOD_SDK_ROOT` is the only SDK checkout plugins need. Generic contracts remain
 under `include/kwf/`; all shared game-specific support is under `include/kwengine/`.
-These are internal responsibility boundaries,
-not separate repositories. The AI/model SHM interface stays with the AI plugin.
+These are internal responsibility boundaries within the same repository.
+Feature-specific interfaces and configuration belong to their owning plugins.
 
 ## Layout and build
+
+The supported build instructions currently target a **Linux host**, producing
+32-bit Windows DLLs. See [Linux build and manual installation](docs/BUILDING.md)
+for prerequisites, compiler overrides and the installed layout.
 
 Production implementation is under `src/`; supported/public or compatibility
 headers are under `include/`. Generated files go only to ignored `build/`:
@@ -52,3 +56,16 @@ target combines them. See [bundle commands and configuration limits](docs/BUNDLE
 Build and staging targets do not install into a game or overwrite user settings.
 Use matching loader/SDK artifacts and preserve customized INIs when installing.
 Runtime loading uses `.kwplugin` manifests; configuration uses `.ini` files.
+
+## Manual installation
+
+Run `make bundle`, close the game, and copy the contents of `build/bundle/` to
+the directory containing `cnc3ep1.dat`, normally `RetailExe/1.2`. Keep
+`dinput8.dll`, `kw_runtime.dll` and `kw_engine.dll` together. Copy each desired
+plugin's bundle onto the same directory; plugins require this loader to run.
+Preserve customized plugin INIs when upgrading. On Wine, select native-first
+`dinput8` loading for this game if it is not already configured.
+
+There is no `make install` target. `BUNDLE_DIR` selects a generated staging
+directory, not an installation destination. Native Windows build instructions
+remain future work; the compiler/output overrides are retained for that path.

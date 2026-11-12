@@ -6,7 +6,7 @@ must validate service versions and have a defined unavailable-provider path.
 The mandatory dependency of a standalone plugin is `KWMOD_SDK_ROOT` only.
 The loader SDK contains generic plugin/service/patch APIs and neutral KW engine
 discovery, bounded reads, native hook context and schema-neutral configuration
-parsing. It does not define pacing, AI, input-tap or presentation-worker protocols.
+parsing. Feature protocols belong to their owning plugins.
 
 ## Neutral loader API
 
@@ -90,34 +90,24 @@ FPS always checks neutral reservation metadata around the separately owned nativ
 Sleep call. Optional protocols add pacing semantics/validation; disabling them
 does not disable broker checks. Invalid sizes/versions, ambiguous ownership,
 duplicate pacing providers or conflicting writes fail closed. Native wait
-pacing has one implementation in `kw_pacing` for every role. The AI entry/game
-DLL, controller and injector implement no pacing policy or native Sleep hook.
+pacing is provided by `kw_pacing` for every role.
 
-## Universal pacing and managed bot startup
+## Loader roles and universal pacing
 
-Pacing has `roles=any` and depends only on the loader SDK. Human startup uses
-the normal DirectInput factory; the bot injector loads that same bundle's
-`dinput8.dll` and calls the generic `KwFrameworkStartInjected` entry before
-initializing the bot game DLL or resuming the primary game thread. This adapter
-has the Windows thread-entry calling convention and takes a numeric role.
-It delegates to the existing `KwFrameworkStart`; no pacing-specific loader API
-or AI/pacing dependency is introduced. The public entry is in `kwf/loader.h`.
+Pacing has `roles=any` and depends only on the loader SDK. Normal startup
+uses the DirectInput factory. An external process launcher can load the same
+`dinput8.dll` and call `KwFrameworkStartInjected` before resuming the game.
+This Windows thread-entry adapter takes a numeric role and delegates to
+`KwFrameworkStart`; the public contract is in `kwf/loader.h`.
 
-Managed bots use `KWF_ROLE_HEADLESS`, including opt-in rendered bots. This role
-selects bot-safe plugins, not the actual D3D state, and prevents recursive human
-controller startup. Later DirectInput calls preserve the selected role and
-continue forwarding to system DirectInput. Startup is once-only per process;
-an attempted role change is rejected. Existing manifest values remain
-`rendered`, `headless`, and `any`; there is no new manifest role or packet field.
-
-The injector resolves the loader two directories above its grouped game DLL,
-or accepts an explicit `--modloader DLL` for manually relocated experiments.
-The standard composed layout needs no additional argument. Missing/incompatible
-loader startup fails before the bot is resumed, never by using an AI-owned wait
-hook as fallback. An absent/disabled pacing plugin is allowed: the bot then uses
-native waits. Per-role pacing overrides remain solely in `kw_pacing.ini`.
-Human runtime logs retain `kw_framework.log`; managed processes use
-`kw_framework-bot-<pid>.log` to avoid sharing/truncating the human log.
+`KWF_ROLE_HEADLESS` selects the manifest role, independently of rendering state.
+Later DirectInput calls preserve that role and forward to system DirectInput.
+Startup is once-only per process; a role change is rejected. Manifest values
+are `rendered`, `headless`, and `any`. Launchers own their startup ordering
+and deployment policy. Absent or disabled pacing retains native waits;
+per-role overrides belong solely to `kw_pacing.ini`.
+Rendered logs use `kw_framework.log`; headless-role logs use
+`kw_framework-bot-<pid>.log` to avoid collisions.
 
 Threading's presentation-worker exchange also moved out of the SDK. Its service
 is now `kwthreading.presentation.worker`, not a reserved `kwf.` ID. UI compiles
@@ -126,24 +116,20 @@ serial FXAA path. Missing providers retain serial rendering. Threading remains
 disabled/rejected by default; this is not new renderer-offload acceptance.
 Do not mix old/new UI/threading binaries across this protocol relocation.
 
-The legacy AI bridge still has other historical writers not all migrated to the
-broker. This change does not claim universal safety for arbitrary third-party
-patches or turn unknown hooks into trusted originals. Preserve the native byte
+The broker cannot guarantee safety for arbitrary third-party patches or turn
+unknown hooks into trusted originals. Preserve the native byte
 validation in every hook installer.
 
 ## Feature configuration and helpers
 
 UI and gameplay have separate public config structures and parsers.
 `kwengine/config.h` defines parsing primitives/descriptors only, and
-`libkw_config.a` contains no feature names, controller endpoint, AI schema or
-feature defaults. Dedicated feature files reject unknown/duplicate keys. Root
-`kwbot_host.ini` fallback reads only recognized feature settings and ignores
-other components' keys. Invalid dedicated files do not silently fall back.
-Absent files use that plugin's defaults.
+`libkw_config.a` contains parsing primitives and no feature schemas or defaults.
+UI reads only `plugins/kw_ui.ini`; gameplay reads only
+`plugins/kw_gameplay.ini`. Dedicated files reject unknown/duplicate keys.
+Missing files use the plugin defaults; invalid files fail instead of selecting
+another component's configuration.
 
-UI defaults/ranges and gameplay fields are checked against the old compatibility
-parser using the current distributed INIs. The legacy full schema remains owned
-by AI solely for compatibility; feature plugins do not link or include it.
 Gameplay publishes no diagnostic input-flow service. Its release configuration
 accepts only functional preservation settings; obsolete diagnostic keys in a
 dedicated gameplay INI must be removed instead of silently activating old hooks.
@@ -153,12 +139,11 @@ UI, profiling and rendering hooks. Guards that explicitly
 reset the FP environment or have different contracts remain feature-owned.
 Other feature helpers and exported configuration APIs live in their
 own plugin headers. UI/gameplay/threading private hook directories are now
-`src/hooks/`; AI `src/game_interface/` implements its model/game-engine bridge.
+`src/hooks/`.
 
 `kwengine/config_values.h` provides shared UTF-8, scalar, RGB, trimming and bounded
-string-copy primitives. The AI compatibility parser delegates to these same
-implementations rather than retaining a second copy. `fixed100` parsing is
-range-neutral; UI-specific bounds stay in the feature schema or legacy wrapper.
+string-copy primitives. `fixed100` parsing is range-neutral; feature-specific
+bounds stay in each plugin's schema.
 
 ### Hook metadata capacity
 

@@ -274,7 +274,7 @@ static inline int kwengine_path_discover(const struct kwengine_path_image *p, st
     if (!l.player_global || !l.data_global || !l.logic_vtable || !l.path_vtable || !l.supply_vtable || !l.list_vtable || !l.player_vtable ||
         !l.squad_vtable)
         return 0;
-    /* Corroborate the AI module's +40 state machine (not +44), State+4 ID,
+    /* Corroborate the native AIUpdate module's +40 state machine (not +44), State+4 ID,
      * and supply module +514 pointer via its +14 UpdateModule receiver. */
     static const unsigned char state_getter[] = {0x8b, 0x49, 0x40, 0x85, 0xc9, 0x75, 0x04, 0x6a, 0x55, 0x58, 0xc3, 0x8b, 0x41, 0x54, 0x85, 0xc0,
                                                  0xba, 0x3f, 0x42, 0x0f, 0x00, 0x74, 0x05, 0x8b, 0x40, 0x04, 0xeb, 0x02, 0x8b, 0xc2, 0x3b, 0xc2,

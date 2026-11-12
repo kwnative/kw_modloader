@@ -8,7 +8,7 @@ copying this example does not permit copying GPL-covered runtime implementation.
 `src/minimal.c` uses only `<kwf/plugin.h>` and exports `KwPluginQuery`.
 From this directory run `make`. If copying this example outside the loader
 checkout, pass `KWMOD_SDK_ROOT=/path/to/kw_modloader` as an environment variable
-or Make argument. No separate SDK, import library, AI or game image is needed.
+or Make argument. No additional SDK, import library or game image is needed.
 The result is `build/bin/kw_example.dll`; place it with `example.kwplugin` in a
 runtime's `plugins/` directory only when explicitly testing the example.
 The manifest is disabled by default. Change both descriptor and manifest IDs

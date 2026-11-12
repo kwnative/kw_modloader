@@ -1,7 +1,6 @@
 # Plugin SDK contract (ABI 1.0)
 
-Include `<kwf/plugin.h>` from `include/`. The generic SDK has no game, graphics,
-AI, controller or networking declarations. Runtime callbacks are supplied as a
+Include `<kwf/plugin.h>` from `include/`. The generic SDK is independent of game-specific features, graphics and networking. Runtime callbacks are supplied as a
 function table, so a plugin does not need an import library for `kw_runtime.dll`.
 The generic runtime artifacts are `build/bin/dinput8.dll` and `kw_runtime.dll`;
 the same repository also builds shared `kw_engine.dll` and engine helper libraries.

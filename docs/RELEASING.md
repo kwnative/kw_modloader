@@ -26,13 +26,12 @@ permissive subset, including inline and statically linked implementations.
    For downloads, provide access to that source in the same place in the manner
    allowed by GPLv3 section 6(d). A link to a moving branch is insufficient.
 3. Include modifications, build scripts and source for linked non-system
-   dependencies as required. For AI tools this includes the exact ggml checkout,
-   `nlohmann/json` headers and vendored Zstandard used for the binaries. Record
-   external revisions and local changes; they are not made available merely by
-   publishing this repository, which does not vendor every dependency.
+   dependencies as required. Record their exact revisions and local changes;
+   publishing this repository does not supply another component's dependencies.
+   Consult each component's own dependency and license notices.
 4. Include project licenses, exception texts, MIT SDK notice and dependency
    notices. `make bundle` stages them at component-specific paths under both
-   `licenses/` and `docs/`. AI CMake installation also installs these notices.
+   `licenses/` and `docs/`.
 5. Keep game executables, game assets, third-party mod content, replays and model
    weights out of source/binary packages unless separately authorized. These
    project licenses do not grant rights to those materials.

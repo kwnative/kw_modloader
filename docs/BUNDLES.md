@@ -1,14 +1,8 @@
-# Build bundles, not live deployment
+# Building and composing runtime bundles
 
-Human and managed bot processes use the same loader
-and `kw_pacing` implementation. Bots bootstrap the bundle's loader before their
-game interface; install a matching `dinput8.dll`, `kw_runtime.dll`, shared
-`kw_engine.dll` and selected plugin manifests/DLLs in the composed layout.
-Do not deploy only a new AI helper into an old detached runtime directory.
-Pacing is optional; native waits remain when it is absent/disabled. AI contains
-no pacing implementation. Use `plugins/kw_pacing.ini` for common defaults
-and optional role overrides.
-See the pacing README and `PLUGIN_INTERACTION.md` for exact startup semantics.
+Install a matching `dinput8.dll`, `kw_runtime.dll`, `kw_engine.dll` and selected
+plugin overlays. Each plugin owns its configuration and feature-specific
+deployment requirements. See the component README and `PLUGIN_INTERACTION.md`.
 
 `make bundle` (alias `make stage`) builds and assembles `build/bundle/`.
 Staging uses the native C++17 `kw_stage_bundle` utility, built automatically
@@ -27,12 +21,6 @@ bundle/
   kw_engine.dll
   README-bundle.md
   plugins/
-    kw_aibot.dll / kw_aibot.kwplugin / kw_aibot.ini
-    kw_aibot/
-      kw_aibot_game.dll
-      kw_aibot_controller.exe
-      kw_aibot_injector.exe
-      kw_aibot_controller.ini.example
     kw_ui.dll / kw_ui.kwplugin / kw_ui.ini
     ...                       # Other selected plugin overlays
   bundle-manifest.json
@@ -67,23 +55,23 @@ The workspace composition Makefile assembles loader plus selected overlays:
 make -C repos bundle -j4
 # Individual plugin overlay, with only one SDK dependency:
 make -C repos/kw_plugin_ui bundle KWMOD_SDK_ROOT=/path/to/kw_modloader
-# UI + gameplay only, no AI:
+# Select only UI and gameplay:
 make -C repos bundle BUNDLE_PLUGINS='kw_plugin_ui kw_plugin_gameplay'
 # Choose the final composition output; source overlays retain separate outputs:
 make -C repos bundle BUNDLE_DIR=/path/to/staging/bundle
 ```
 
-Default composition includes UI, gameplay, pacing, FPS and AI. Threading,
-harvester diagnostics and the example require explicit selection/build and
-appropriate operator configuration; threading's manifest remains disabled.
+The composition repository selects the release profile; this loader repository
+does not require or select any plugin. Experimental plugins need explicit
+selection and appropriate operator configuration.
 Input-flow and logic-timing research probes are not release plugin targets or
 interfaces. Default staging includes only each selected plugin's release files,
 even when obsolete diagnostic outputs exist from an earlier developer build.
 
 Bundle builds compile optional cooperation with the selected production plugins
-automatically. In the default composition, FPS is built with
-`WITH_PACING_INTEGRATION=1`; UI keeps `WITH_THREADING_INTEGRATION=0` because
-threading is excluded. The composition passes its selected plugin list to
+automatically. Selecting FPS and pacing enables
+`WITH_PACING_INTEGRATION=1`; omitting threading keeps UI
+`WITH_THREADING_INTEGRATION=0`. The composition passes its selected plugin list to
 overlays as `KWMOD_BUNDLE_PROVIDERS`. Header detection never stages or enables
 an experimental provider. Provider services are still optional at runtime;
 absence retains the consumer's defined standalone behavior.
@@ -113,48 +101,8 @@ cleans an arbitrary directory. Keep output directories dedicated to generated
 bundles and unchanged. Make user edits after installation, not inside staging.
 Archive the directory contents with your preferred ZIP/archive tooling.
 
-## AI configuration boundary
+## Manual installation
 
-The entry DLL, manifest and configuration share the `kw_aibot` basename.
-The host INI is in `plugins/`; it resolves the controller path from the engine/
-loader root, not the working directory. Bridge loading resolves from the entry
-DLL's absolute location into its `kw_aibot/` resource directory. The old
-root `kwbot_host.ini` is a missing-file compatibility fallback only. A readable
-invalid preferred INI fails rather than silently selecting the old file.
-
-Only the controller configuration intentionally remains `.ini.example`; staging
-does not promote its installation-specific paths/helper-hash placeholders to a
-working user INI. Configure it and save as `kw_aibot_controller.ini` beside the
-controller EXE. Paths inside that INI resolve from that same resource directory.
-The standard template uses `..\..\cnc3ep1.dat`, four parent levels to the game
-working directory/SkuDef, and five to the sibling writable `kwbot_state` root.
-The installed engine, content, SkuDef, profiles and writable report directories
-are installation inputs and are not shipped here. Human and bot roles reuse
-the same installed engine and the root `kw_engine.dll`; do not provision a
-second DAT or SDK copy in the plugin directory. The injector explicitly selects
-the headless loader role before game entry, so the normal adjacent plugin tree
-does not start a human bridge in the bot process. No global DLL search paths
-are changed.
-
-An adjacent Tacitus `dsound.dll` may itself import D3D9. The AI plugin's managed
-headless path keeps that proxy loaded and redirects graphics factory calls to
-its null backend in that bot process only. It does not edit Tacitus files,
-network hooks, DLL overrides or the human process. This requires a matched AI
-injector/game-interface pair; an older injector's module-presence guard can
-reject the dependency even before rendering begins. Loaded D3D9 is not accepted
-as evidence of headless operation: current factory-redirection attestation,
-unchanged null hooks and the no-backend/window checks still apply. Internet
-login/room integration remains a separate acceptance milestone.
-
-The modular bridge requires the shared `kw_engine.dll` to be resolvable in
-every bot process, as well as the human process. Review that runtime layout
-when installing; the flat AI overlay alone is not a complete bot launch setup.
-Install a complete matching loader/plugin composition, not a mixture of
-unrelated versions. Preserve customized INIs during upgrades. The controller
-fields `injector_executable`, `injector_sha256`, `game_interface_dll` and
-`game_interface_sha256` identify its own matching helpers; they do not validate
-game/SkuDef identity. No build target performs live installation changes.
-
-No target installs into a game, overwrites a live user INI, starts Wine/the game,
-or claims a new live-game compatibility pass. Before a public installer/archive
-is released, its complete runtime composition still needs installation testing.
+See [the Linux build and installation guide](BUILDING.md). Copy the loader bundle
+to the engine directory and each selected plugin overlay onto it. Preserve
+customized INIs on upgrades. Build/staging targets never install into a game.

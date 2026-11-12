@@ -1,8 +1,8 @@
 # KW-specific support SDK
 
 The `kw_modloader` repository owns this game-specific implementation alongside
-the generic loader/runtime. It does not require an AI plugin.
-Shared public headers use `kwengine/`, not the AI plugin's `kwaibot/` namespace.
+the generic loader/runtime. It is independent of feature plugins.
+Shared public headers use the `kwengine/` namespace.
 The C API uses `kwengine_*` / `KWENGINE_*` names. Build consumers against the
 matching SDK version.
 The generic loader implementation does not include game-specific headers.
@@ -20,7 +20,6 @@ The generic loader implementation does not include game-specific headers.
   [third-party notices](THIRD_PARTY_NOTICES.md).
 - `build/lib/libkw_config.a`: schema-neutral bounded configuration parsing.
   Field descriptors, names, defaults and feature structures belong to plugins.
-  The old full host parser is AI-owned, not part of this SDK.
 
 ## Discovery and mutation
 
@@ -71,7 +70,7 @@ episode coherence; the address itself grants no observation or lifecycle rights.
 map holder, native map/ghost RTTI and eight resource-property NameKey wrappers.
 `kwengine_map_sources` uses the existing process-wide resolver and validates
 data spans; missing/incomplete resolution zeroes its output. It does not add
-exports, hooks, engine calls, lazy-key initialization or an AI-plugin dependency.
+exports, hooks, engine calls, lazy-key initialization or a feature-plugin dependency.
 The named-data resolver joins a unique engine string to its unique aligned
 writable wrapper, independently of the current mutable NameKey value. It does
 not substitute an asset-name hash or a reference-address delta.
@@ -150,14 +149,12 @@ payloads. See [plugin interaction](PLUGIN_INTERACTION.md) for exact contracts,
 flags, runtime failure rules and the built-in read-only ownership query.
 
 `kwengine/hook_context.h` provides neutral native FPU/MXCSR/LastError preservation;
-`kwengine/native_status.h` retains the common native status/result layout without
-AI launch/LAN structures or functions. Native status fields/layout and numeric
-results remain unchanged, but their source names now reflect SDK ownership.
+`kwengine/native_status.h` provides the common native status/result layout.
+Feature-specific launch or networking structures belong to their plugins.
 
-The full model-facing SHM/client API belongs to `kw_plugin_aibot/include`, not
-this engine support SDK. Static design data, lawful live observations and current
-action permission remain distinct domains. Fog, stealth and observer restrictions
-must be enforced by the owning game interface.
+Static design data, lawful live observations and current action permission
+remain distinct domains. Fog, stealth and observer restrictions must be enforced
+by each consuming game interface.
 
 ## Build configuration
 
