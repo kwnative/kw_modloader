@@ -1,0 +1,16 @@
+; SPDX-FileCopyrightText: 2026 N.Leiten
+; SPDX-License-Identifier: MIT
+LIBRARY kw_engine
+EXPORTS
+    kwengine_resolve
+    kwengine_va
+    kwengine_rva
+    kwengine_memcmp
+    kwengine_normalize_code
+    kwengine_is_code
+    kwengine_is_data
+    kwengine_is_ready
+    kwengine_code_span
+    kwengine_patch_site_valid
+    kwengine_chat_filter_valid
+    kwengine_default_dependency

@@ -1,0 +1,32 @@
+Independent plugin linking permission, version 1.0
+
+Additional permission under GNU GPL version 3, section 7.
+
+For the kw_modloader material to which this permission is applied, its
+copyright holders permit you to link or combine an Independent Plugin with
+the covered loader, runtime and engine-support libraries through the public
+kwf and kwengine interfaces, and to convey the resulting combination. The
+Independent Plugin may be distributed under terms of your choice, including
+proprietary terms, without being subject to the GNU GPL solely because of
+that linking, loading, calls, callbacks, or combination.
+
+An Independent Plugin is a separately developed module that is not derived
+from covered loader/runtime implementation, except for use of the separately
+MIT-licensed SDK material identified in LICENSING.md. A proprietary license,
+a separate DLL, or an API wrapper does not by itself make copied covered
+implementation independent.
+
+The GNU GPL continues to apply to the covered loader, runtime, engine-support
+implementation and all modifications to them. When conveying a combination,
+satisfy the GNU GPL's requirements for that covered code, including providing
+its Corresponding Source. The Independent Plugin's source is not required
+solely by this permission.
+
+This permission does not relicense any other plugin or its API, authorize
+copying GPL-covered implementation into an Independent Plugin, or override
+third-party licenses. The separate game interoperability permission addresses
+combination with the proprietary game. SDK static helpers and example code
+remain available under their own MIT license.
+
+You may extend this permission to your modifications, but are not obliged
+to do so. You may remove it as permitted by GNU GPL version 3, section 7.

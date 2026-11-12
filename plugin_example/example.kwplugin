@@ -1,0 +1,7 @@
+# Optional independent SDK example. No game hooks.
+id=example
+library=kw_example.dll
+abi=1
+enabled=0
+roles=any
+requires=

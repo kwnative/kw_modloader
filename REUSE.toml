@@ -1,0 +1,24 @@
+version = 1
+
+# Project code is GPL-3.0-only with the explicit permissions in LICENSING.md.
+# Third-party notices and licenses retain their original terms.
+[[annotations]]
+path = [".clang-format", ".gitignore", "Makefile", "README.md", "LICENSING.md", "CONTRIBUTING.md", "REUSE.toml", "THIRD_PARTY_NOTICES.md",
+        "src/**", "include/**", "mk/**", "tests/**", "tools/**", "config/**", "examples/**", "docs/**", "plugin_example/**",
+        "notices/GAME_EXCEPTION.txt", "notices/PLUGIN_EXCEPTION.txt"]
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 N.Leiten"
+SPDX-License-Identifier = "LicenseRef-KW-Modloader"
+
+# These compiled/inline helpers are part of the reusable SDK, not GPL runtime implementation.
+[[annotations]]
+path = ["include/**", "mk/**", "plugin_example/**", "src/config/**", "src/timing/**", "src/engine/engine.def", "SDK_LICENSE"]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 N.Leiten"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["notices/fps_reference.txt"]
+precedence = "override"
+SPDX-FileCopyrightText = "2004 Sam Hocevar"
+SPDX-License-Identifier = "WTFPL"

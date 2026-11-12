@@ -1,0 +1,887 @@
+/* SPDX-FileCopyrightText: 2026 N.Leiten
+ * SPDX-License-Identifier: MIT
+ */
+#include <kwengine/timing/game_layout.h>
+
+#define PATTERN_ANY 0x100u
+
+/*
+ * Signatures are deliberately kept next to the resolver below. Each one is
+ * scanned once and immediately assigned to the field that consumes it; there
+ * is no parallel ID enum, registry table, or untyped matches array to keep in
+ * sync.
+ */
+static const u16 g_kw_runtime_config_pattern[] = {0x01,        0x88,        0x04,        0x0C,        0x00, 0x00,        0x8B,        0x0D,
+                                                  PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+                                                  PATTERN_ANY, 0x5F,        0x5E,        0x5B,        0xC9, 0xC3};
+static const u16 g_kw_session_tail_pattern[] = {
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x5F, 0x5E, 0x5B,
+    0xE9, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x53, 0x55,        0x56,        0x57,        0x8B,        0x7C, 0x24, 0x14};
+/* TW's late runtime call has a different ABI, so it has a separate signature. */
+static const u16 g_tw_runtime_config_pattern[] = {0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B,        0x0D, PATTERN_ANY,
+                                                  PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x89,        0x81,        0x04,        0x0C, 0x00,
+                                                  0x00,        0xA1,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x0D,
+                                                  PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x01,        0x88,        0x04, 0x0C,
+                                                  0x00,        0x00,        0x5F,        0x5E,        0x5B,        0xC9,        0xC3};
+static const u16 g_tw_session_tail_pattern[] = {
+    0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x5F, 0x5E, 0x5B,
+    0xE9, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x55, 0x56,        0x57,        0x8B,        0x7C,        0x24, 0x10};
+
+/*
+ * TW 1.09/1.10 and all supported KW builds share this complete Keyboard
+ * update leaf. The decoded tail jump reaches the event processor, where the
+ * repeat call is validated at its fixed control-flow offset below.
+ */
+static const u16 g_keyboard_update_pattern[] = {0x56, 0x8B, 0xF1,        0xFF,        0x86,        0x28,        0x0E, 0x00,
+                                                0x00, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0xCE,
+                                                0x5E, 0xE9, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+
+/* The 111-byte stock repeat body; only its queue-insertion CALL relocates. */
+static const u16 g_keyboard_repeat_body_pattern[] = {
+    0x55, 0x8B, 0xEC, 0x51, 0x51, 0x53, 0x56, 0x8B, 0xF1, 0x57, 0x32, 0xC0, 0x33, 0xDB, 0x8D, 0x4E,        0x2C,        0xBF,        0x00,
+    0x01, 0x00, 0x00, 0xF6, 0x41, 0xFE, 0x02, 0x74, 0x0D, 0x8B, 0x96, 0x28, 0x0E, 0x00, 0x00, 0x2B,        0x11,        0x83,        0xFA,
+    0x0A, 0x77, 0x0A, 0x43, 0x83, 0xC1, 0x08, 0x3B, 0xDF, 0x7C, 0xE5, 0xEB, 0x37, 0x8D, 0x45, 0xF8,        0x50,        0x8D,        0x4E,
+    0x1C, 0x88, 0x5D, 0xF8, 0x66, 0xC7, 0x45, 0xFA, 0x02, 0x01, 0xC6, 0x45, 0xF9, 0x00, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8D, 0x86, 0x28, 0x0E, 0x00, 0x00, 0x8D, 0x4E, 0x2C, 0x8B, 0x10, 0x89, 0x11, 0x83, 0xC1, 0x08,        0x4F,        0x75,        0xF6,
+    0x8B, 0x00, 0x83, 0xE8, 0x0C, 0x89, 0x44, 0xDE, 0x2C, 0xB0, 0x01, 0x5F, 0x5E, 0x5B, 0xC9, 0xC3};
+/* Full event processor: queue bounds/8-byte stride, state/sequence writes,
+ * unchanged ECX at the repeat call, modifier loop and balanced return. Only
+ * the two native CALL displacements relocate. This independently proves every
+ * keyboard field the rate wrapper accesses, including on protected KW builds. */
+static const u16 g_keyboard_process_pattern[] = {
+    0x53,        0x56,        0x8B,        0xF1,        0x8B,        0x5E,        0x20, 0x57, 0x8B, 0x7E, 0x1C, 0xEB, 0x6C, 0x0F, 0xB6, 0x07,
+    0x66,        0x8B,        0x4F,        0x02,        0x66,        0x89,        0x4C, 0xC6, 0x2A, 0x0F, 0xB6, 0x07, 0x8A, 0x4F, 0x01, 0x88,
+    0x4C,        0xC6,        0x29,        0x0F,        0xB6,        0x07,        0x8B, 0x8E, 0x28, 0x0E, 0x00, 0x00, 0x89, 0x4C, 0xC6, 0x2C,
+    0x8A,        0x07,        0x3C,        0x0F,        0x75,        0x18,        0xF6, 0x86, 0xEA, 0x01, 0x00, 0x00, 0x02, 0x75, 0x09, 0xF6,
+    0x86,        0xEA,        0x05,        0x00,        0x00,        0x02,        0x74, 0x2E, 0xC6, 0x47, 0x01, 0x01, 0xEB, 0x28, 0x3C, 0x3A,
+    0x74,        0x18,        0x3C,        0x1D,        0x74,        0x14,        0x3C, 0x9D, 0x74, 0x10, 0x3C, 0x2A, 0x74, 0x0C, 0x3C, 0x36,
+    0x74,        0x08,        0x3C,        0x38,        0x74,        0x04,        0x3C, 0xB8, 0x75, 0x0C, 0x66, 0x0F, 0xB6, 0xC0, 0x8B, 0xCE,
+    0x50,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0xC7, 0x08, 0x3B, 0xFB, 0x75, 0x90, 0x8B, 0xCE, 0xE8,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x66,        0x83,        0x7E, 0x18, 0x00, 0x74, 0x17, 0x8B, 0x4E, 0x20, 0x8B, 0x46,
+    0x1C,        0xEB,        0x0B,        0x66,        0x8B,        0x56,        0x18, 0x66, 0x09, 0x50, 0x02, 0x83, 0xC0, 0x08, 0x3B, 0xC1,
+    0x75,        0xF1,        0x5F,        0x5E,        0x5B,        0xC3,
+};
+
+/* Continuous visual integration sites that incorrectly share retail 1/30. */
+static const u16 g_camera_pattern[] = {0x80, 0xBB, 0xC8, 0x00,        0x00,        0x00,        0x00,        0x75,
+                                       0x6F, 0xD9, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x51};
+static const u16 g_laser_pattern[] = {0x0F, 0x2F, 0xF1, 0xF3, 0x0F, 0x10, 0x1D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+                                      0xF3, 0x0F, 0x2A, 0xE0, 0x0F, 0x28, 0xEC, 0xF3,        0x0F,        0x59,        0xEB};
+static const u16 g_model_pattern[] = {0x8B, 0x01, 0xFF, 0x50, 0x78, 0xF3, 0x0F,        0x10,        0x86,        0xF4,       0x02,
+                                      0x00, 0x00, 0xF3, 0x0F, 0x58, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+
+/*
+ * TW and KW share this camera-input implementation byte-for-byte. It is
+ * evaluated once per client frame, so scroll input, held zoom/rotation keys,
+ * terrain-height settling, and legacy camera shake need separate scaling.
+ */
+static const u16 g_camera_zoom_behavior_pair_pattern[] = {
+    0x80,        0x7C, 0x24, 0x08, 0x00, 0x74, 0x0E, 0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0x8B, 0x01, 0xFF, 0x90, 0x14, 0x01, 0x00, 0x00, 0xC2,        0x10,        0x00,
+    0x80,        0x7C, 0x24, 0x08, 0x00, 0x74, 0x0E, 0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0x8B, 0x01, 0xFF, 0x90, 0x18, 0x01, 0x00, 0x00, 0xC2,        0x10,        0x00};
+static const u16 g_camera_rotate_behavior_pattern[] = {0x80,        0x7C,        0x24, 0x08, 0x00, 0x74, 0x1E, 0xA1, PATTERN_ANY, PATTERN_ANY,
+                                                       PATTERN_ANY, PATTERN_ANY, 0xF3, 0x0F, 0x10, 0x80, 0x34, 0x0D, 0x00,        0x00,
+                                                       0x8B,        0x44,        0x24, 0x10, 0xF3, 0x0F, 0x59, 0x41, 0x04,        0xF3,
+                                                       0x0F,        0x58,        0x00, 0xF3, 0x0F, 0x11, 0x00, 0xC2, 0x10,        0x00};
+static const u16 g_camera_scroll_by_pattern[] = {
+    0x55, 0x8B, 0xEC,        0xA1,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0xEC, 0x64, 0x80, 0xB8, 0xCC, 0x00,
+    0x00, 0x00, 0x00,        0x53,        0x8B,        0xD9,        0x74,        0x0D,        0x80, 0x7B, 0x44, 0x00, 0x74, 0x07, 0x33,
+    0xC0, 0xE9, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x80,        0xBB,        0xF1, 0x24, 0x00, 0x00, 0x00, 0x75, 0xF0};
+static const u16 g_camera_adjust_pattern[] = {0xD9, 0x45, 0xF8, 0xD8, 0x65,        0xF4,        0xD8,        0x8F,       0x14,
+                                              0x0B, 0x00, 0x00, 0xD9, 0x5D,        0xF4,        0xD9,        0x45,       0xF4,
+                                              0xD9, 0xE1, 0xDD, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+static const u16 g_camera_shake_pattern[] = {0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x80, 0xB8, 0x44, 0x0F, 0x00, 0x00, 0x00, 0x74,
+                                             0x09, 0x80,        0xB8,        0x45,        0x0F,        0x00, 0x00, 0x00, 0x74, 0x22, 0xF3, 0x0F, 0x59,
+                                             0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xF3, 0x0F, 0x11, 0x43, 0x78};
+
+/* Absolute client-frame consumers whose authored data remains in 30 Hz units. */
+static const u16 g_tracer_reset_pattern[] = {0x8B, 0x01, 0xFF, 0x50, 0x78, 0x89, 0x86, 0x90, 0x00, 0x00, 0x00, 0x5E, 0xC3};
+static const u16 g_tracer_update_pattern[] = {0x8B, 0x01, 0x57, 0xFF, 0x50, 0x78, 0x3B, 0x86, 0x90, 0x00, 0x00, 0x00};
+static const u16 g_cloud_pattern[] = {0x8B, 0x01, 0xFF, 0x50, 0x78, 0x33, 0xDB, 0x32, 0xC9, 0x39, 0x46, 0x70};
+static const u16 g_anim2d_set_pattern[] = {0x66,        0x89, 0x46, 0x04, 0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+                                           PATTERN_ANY, 0x8B, 0x01, 0xFF, 0x50, 0x78, 0x89,        0x46,        0x08};
+static const u16 g_anim2d_update_pattern[] = {0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x01, 0xFF,
+                                              0x50, 0x78, 0x2B,        0x46,        0x08,        0x3B,        0x46, 0x18};
+
+/* Particle/cursor sites use a mix of client-frame and millisecond timebases. */
+static const u16 g_particle_pattern[] = {0x8B, 0xF1, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x83, 0x66, 0x40, 0x00, 0x6A, 0x02,
+                                         0x8D, 0xBE, 0x8C, 0x00,        0x00,        0x00,        0x5B,        0xFF, 0x77, 0x04, 0x8B, 0xCF};
+static const u16 g_gpu_pattern[] = {0xA1,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x0F, 0xAF, 0x05, PATTERN_ANY, PATTERN_ANY,
+                                    PATTERN_ANY, PATTERN_ANY, 0x85,        0xC0,        0x89,        0x45, 0xFC, 0x56, 0x8B,        0xF1};
+static const u16 g_radius_cursor_throb_pattern[] = {0x8B, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x01, 0x57, 0xFF,
+                                                    0x50, 0x78, 0x8B,        0xF8,        0x8B,        0x06,        0xD9, 0x40, 0x14, 0x51,
+                                                    0xD8, 0x0D, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x51, 0xDD, 0x1C, 0x24};
+
+/* Independent presentation limiter and GameEngine pacing/history control flow. */
+static const u16 g_display_pattern[] = {0x83, 0xF9, 0x1D, 0x7D, 0x13, 0xE8};
+static const u16 g_pacing_pattern[] = {
+    0x3B,        0xC8,        0x76,        0x07, 0xC6, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00,        0x80, 0x3D, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x00, 0x74, 0x69, 0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xDB, 0x86, 0x64,
+    0x01,        0x00,        0x00,        0x8B, 0xD8, 0xD8, 0x0D,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD8, 0x3D, PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+/* Stock wait loop: Sleep(0), current time minus the same limiter timestamp,
+ * compare against the calculated budget, and branch back to the loop start. */
+static const u16 g_pacing_wait_pattern[] = {0x6A, 0x00,        0xFF,        0x15,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+                                            0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B,        0xD8,        0x2B,
+                                            0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x3B,        0xC7,        0x72,
+                                            0xE7, 0x89,        0x1D,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+
+/*
+ * Confirmed KW virtual addresses. Absolute and relative operands are the only
+ * wildcarded bytes in the signatures below.
+ *
+ *                              phase batch  interpolation  slice flush  W3D special  W3D normal
+ * KW 1.02 EA/Origin 2009       0x00583DE7   0x0057149A     0x0051C892   0x007A4F53   0x007A4F8E
+ * KW 1.02 Steam 2012           0x006560A6   0x0064333E     0x005EF10F   0x004A5A7C   0x004A5AB7
+ * KW 1.03                      0x005C3C61   0x005B0F6D     0x0055C5A6   0x007F0F31   0x007F0F6C
+ */
+static const u16 g_phase_batch_pattern[] = {0x8D, 0x47, 0xFF, 0x0F, 0xAF, 0xC1, 0x99, 0x6A, 0x06, 0x5E, 0xF7,
+                                            0xFE, 0x40, 0x6B, 0xC0, 0x06, 0x99, 0xF7, 0xF9, 0x8B, 0xF0, 0x46};
+static const u16 g_phase_interpolation_pattern[] = {0xF3,        0x0F,        0x2A,        0x41,        0x40, 0xF3, 0x0F, 0x59, 0x05, PATTERN_ANY,
+                                                    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x0F,        0x57, 0xC9, 0x0F, 0x2F, 0xC8, 0xF3,
+                                                    0x0F,        0x11,        0x41,        0x48,        0x77, 0x0D, 0xF3, 0x0F, 0x10, 0x0D,
+                                                    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x0F, 0x2F, 0xC1, 0x76, 0x03, 0x0F,
+                                                    0x28,        0xC1,        0xF3,        0x0F,        0x11, 0x41, 0x48, 0xC3};
+static const u16 g_client_slice_flush_pattern[] = {
+    0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x33, 0xD2, 0xF7, 0x35, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x6A, 0x06,        0x8B,        0xC8,        0x58,        0x99, 0xF7, 0xF9, 0x5F, 0x8B,        0xC8,        0x8B,        0x45,
+    0x08, 0x99,        0xF7,        0xF9,        0x85,        0xD2, 0x75, 0x05, 0xE8, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+static const u16 g_w3d_special_advance_pattern[] = {0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x03,
+                                                    0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x50,
+                                                    0xA3, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+static const u16 g_w3d_normal_advance_pattern[] = {0xA1, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x0F,        0xAF,
+                                                   0xC6, 0x01,        0x05,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+                                                   0xFF, 0x35,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+
+/* CRT initializers prove the identities and units of timing-cache globals. */
+static const u16 g_w3d_initializer_pattern[] = {0xB8,        0xE8,        0x03,        0x00,        0x00,        0x33,        0xD2,
+                                                0xF7,        0x35,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xA3,
+                                                PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xC3};
+static const u16 g_audio_initializer_pattern[] = {
+    0x51,        0xA1,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xDB,        0x05,        PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x85,        0xC0,        0x7D,        0x06,        0xD8,        0x05,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD8,        0x3D,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0xD9,        0x1D,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x59,        0xC3};
+
+/*
+ * Stable tail of SageAudioManager::UpdateForClientFrame. The function begins
+ * 0x12A bytes before this block in every supported image. Its sole non-code
+ * absolute xref is vtable slot 5.
+ */
+/* Full unsigned-frame subtraction / millisecond conversion. The surrounding
+ * current-frame read and the cached scalar independently prove this identity. */
+static const u16 g_audio_delta_pattern[] = {0x85,        0xC0,        0x89,        0x45,        0xFC,        0xDB,        0x45,        0xFC, 0x7D,
+                                            0x06,        0xD8,        0x05,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B, 0x46,
+                                            0x38,        0xDB,        0x46,        0x38,        0x85,        0xC0,        0x7D,        0x06, 0xD8,
+                                            0x05,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xDE,        0xE9,        0xD8, 0x0D,
+                                            PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD9,        0x5D,        0xFC};
+static const u16 g_audio_update_tail_pattern[] = {
+    0x8B,        0x8E,        0x6C,        0x02,        0x00,        0x00,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    0x8B,        0x4E,        0x30,        0x3B,        0xCB,        0x74,        PATTERN_ANY, 0xF3,        0x0F,        0x2C,        0x46,
+    0x34,        0x50,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B,        0xCE,        0xE8,        PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B,        0xCE,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8D,
+    0x45,        0xF8,        0x50,        0x8B,        0xCE,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8D,
+    0x45,        0xF8,        0x50,        0x8B,        0xCE,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x8B,
+    0xCE,        0xE8,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY};
+static const u16 g_float_initializer_pattern[] = {0x51,        0xA1,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xDB, 0x05,
+                                                  PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x85,        0xC0,        0x7D, 0x06,
+                                                  0xD8,        0x05,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD9, 0x1D,
+                                                  PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x59,        0xC3};
+static const u16 g_frames_per_millisecond_initializer_pattern[] = {
+    0x51,        0xA1,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xDB,        0x05,        PATTERN_ANY,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x85,        0xC0,        0x7D,        0x06,        0xD8,        0x05,
+    PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xD8,        0x0D,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY,
+    PATTERN_ANY, 0xD9,        0x1D,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0x59,        0xC3};
+static const u16 g_seconds_initializer_pattern[] = {0xF3, 0x0F, 0x10,        0x05,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xF3,
+                                                    0x0F, 0x5E, 0x05,        PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xF3,        0x0F,
+                                                    0x11, 0x05, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, PATTERN_ANY, 0xC3};
+
+static BOOL get_nt_headers(u8 *module, IMAGE_NT_HEADERS32 **out_nt)
+{
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS32 *nt;
+    if (module == NULL || out_nt == NULL)
+        return FALSE;
+    dos = (IMAGE_DOS_HEADER *)module;
+    /* Bound e_lfanew before following a pointer supplied by an unknown image. */
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x100000) {
+        return FALSE;
+    }
+    nt = (IMAGE_NT_HEADERS32 *)(module + (u32)dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->FileHeader.Machine != IMAGE_FILE_MACHINE_I386 ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC || nt->OptionalHeader.SizeOfImage < 0x400000u ||
+        nt->OptionalHeader.SizeOfImage > 0x04000000u || nt->FileHeader.NumberOfSections == 0 || nt->FileHeader.NumberOfSections > 96u ||
+        nt->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER32) || nt->OptionalHeader.SizeOfHeaders > nt->OptionalHeader.SizeOfImage ||
+        (u32)dos->e_lfanew + sizeof(u32) + sizeof(IMAGE_FILE_HEADER) + nt->FileHeader.SizeOfOptionalHeader +
+                (u32)nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER) >
+            nt->OptionalHeader.SizeOfHeaders) {
+        return FALSE;
+    }
+    *out_nt = nt;
+    return TRUE;
+}
+
+static BOOL pattern_matches(const u8 *bytes, const u16 *pattern, size_t size)
+{
+    size_t i;
+    for (i = 0; i < size; ++i) {
+        if (pattern[i] != PATTERN_ANY && bytes[i] != (u8)pattern[i])
+            return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL find_unique_signature_filtered(u8 *module, IMAGE_NT_HEADERS32 *nt, const u16 *pattern, size_t pattern_size, size_t operand_offset,
+                                           u32 expected_absolute, u32 *out_rva)
+{
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 found = 0;
+    size_t matches = 0;
+    u16 section_index;
+    size_t anchor = 0;
+    if (pattern_size == 0 || pattern_size > nt->OptionalHeader.SizeOfImage ||
+        (operand_offset != SIZE_MAX && (pattern_size < sizeof(u32) || operand_offset > pattern_size - sizeof(u32))))
+        return FALSE;
+    while (anchor < pattern_size && pattern[anchor] == PATTERN_ANY)
+        ++anchor;
+    if (anchor == pattern_size)
+        return FALSE;
+
+    /*
+     * Scan executable virtual ranges, where relocation has already fixed
+     * absolute operands. Requiring exactly one match makes every signature a
+     * semantic assertion rather than a best-effort version lookup.
+     */
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections; ++section_index, ++section) {
+        u32 start;
+        u32 size;
+        const u8 *cursor, *last;
+        if ((section->Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ)) != (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ))
+            continue;
+        start = section->VirtualAddress;
+        size = section->Misc.VirtualSize;
+        if (start >= nt->OptionalHeader.SizeOfImage || size > nt->OptionalHeader.SizeOfImage - start || size < pattern_size) {
+            continue;
+        }
+        /* memchr avoids interpreting every byte of large protected sections.
+         * Advance one byte after a hit so overlapping matches remain visible. */
+        cursor = module + start + anchor;
+        last = module + start + size - pattern_size + anchor;
+        while (cursor <= last) {
+            const u8 *hit = memchr(cursor, (u8)pattern[anchor], (size_t)(last - cursor) + 1u);
+            const u8 *candidate;
+            if (hit == NULL)
+                break;
+            candidate = hit - anchor;
+            cursor = hit + 1;
+
+            if (pattern_matches(candidate, pattern, pattern_size) &&
+                (operand_offset == SIZE_MAX || load_u32(candidate + operand_offset) == expected_absolute)) {
+                found = (u32)(candidate - module);
+                if (++matches > 1)
+                    return FALSE;
+            }
+        }
+    }
+    if (matches != 1)
+        return FALSE;
+    *out_rva = found;
+    return TRUE;
+}
+
+static BOOL find_unique_signature(u8 *module, IMAGE_NT_HEADERS32 *nt, const u16 *pattern, size_t pattern_size, u32 *out_rva)
+{
+    return find_unique_signature_filtered(module, nt, pattern, pattern_size, SIZE_MAX, 0, out_rva);
+}
+
+static BOOL find_signature_using_absolute_operand(u8 *module, IMAGE_NT_HEADERS32 *nt, const u16 *pattern, size_t pattern_size,
+                                                  size_t input_operand_offset, u32 expected_absolute, u32 *out_rva)
+{
+    return find_unique_signature_filtered(module, nt, pattern, pattern_size, input_operand_offset, expected_absolute, out_rva);
+}
+
+static BOOL find_unique_readonly_pointer(u8 *module, IMAGE_NT_HEADERS32 *nt, u32 expected_absolute, u32 *out_rva)
+{
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u32 found = 0;
+    size_t matches = 0;
+    u16 section_index;
+
+    for (section_index = 0; section_index < nt->FileHeader.NumberOfSections; ++section_index, ++section) {
+        u32 start;
+        u32 size;
+        u32 offset;
+        if ((section->Characteristics & IMAGE_SCN_MEM_READ) == 0 || (section->Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)) != 0) {
+            continue;
+        }
+        start = section->VirtualAddress;
+        size = section->Misc.VirtualSize;
+        if (start >= nt->OptionalHeader.SizeOfImage || size > nt->OptionalHeader.SizeOfImage - start || size < sizeof(u32)) {
+            continue;
+        }
+        for (offset = 0; offset <= size - sizeof(u32); offset += sizeof(u32)) {
+            if (load_u32(module + start + offset) == expected_absolute) {
+                found = start + offset;
+                if (++matches > 1)
+                    return FALSE;
+            }
+        }
+    }
+    if (matches != 1)
+        return FALSE;
+    *out_rva = found;
+    return TRUE;
+}
+
+static BOOL absolute_operand_to_rva(u8 *module, u32 image_size, u32 absolute, u32 *out_rva)
+{
+    uintptr_t base = (uintptr_t)module;
+    uintptr_t address = (uintptr_t)absolute;
+    /* Reject imports, heap pointers, and any operand outside the main image. */
+    if (address < base || address - base >= image_size)
+        return FALSE;
+    *out_rva = (u32)(address - base);
+    return TRUE;
+}
+
+static BOOL read_absolute_rva(u8 *module, u32 image_size, u32 operand_rva, u32 *out_rva)
+{
+    if (operand_rva > image_size - sizeof(u32))
+        return FALSE;
+    return absolute_operand_to_rva(module, image_size, load_u32(module + operand_rva), out_rva);
+}
+
+static BOOL decode_relative_target(u8 *module, u32 image_size, u32 instruction_rva, u8 opcode, u32 *out_target_rva)
+{
+    i32 displacement;
+    i32 target;
+    /* BranchSite targets are stored as RVAs so ASLR never leaks past resolution. */
+    if (instruction_rva > image_size - 5u || module[instruction_rva] != opcode)
+        return FALSE;
+    memcpy(&displacement, module + instruction_rva + 1u, sizeof(displacement));
+    target = (i32)(instruction_rva + 5u) + displacement;
+    if (target < 0 || (u32)target >= image_size)
+        return FALSE;
+    *out_target_rva = (u32)target;
+    return TRUE;
+}
+
+#define FIND_UNIQUE(module, nt, pattern, out_rva) find_unique_signature((module), (nt), (pattern), ARRAY_COUNT(pattern), (out_rva))
+
+static BOOL resolve_kw_bootstrap_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    u32 match;
+    BranchSite runtime_config_call;
+    BranchSite start_session_tail;
+
+    if (!FIND_UNIQUE(module, nt, g_kw_runtime_config_pattern, &match))
+        return FALSE;
+    runtime_config_call.instruction = match + 12u;
+    if (!decode_relative_target(module, game->pe_size_of_image, runtime_config_call.instruction, 0xE8, &runtime_config_call.target)) {
+        return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_kw_session_tail_pattern, &match))
+        return FALSE;
+    start_session_tail.instruction = match + 13u;
+    if (!decode_relative_target(module, game->pe_size_of_image, start_session_tail.instruction, 0xE9, &start_session_tail.target)) {
+        return FALSE;
+    }
+
+    game->bootstrap.runtime_config_call = runtime_config_call;
+    game->bootstrap.start_session_tail = start_session_tail;
+    game->bootstrap.runtime_config_hook_kind = RUNTIME_CONFIG_HOOK_THISCALL;
+    game->target_name = "Kane's Wrath (signature-resolved)";
+    return TRUE;
+}
+
+static BOOL resolve_tw_bootstrap_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    u32 match;
+    BranchSite runtime_config_call;
+    BranchSite start_session_tail;
+
+    if (!FIND_UNIQUE(module, nt, g_tw_runtime_config_pattern, &match))
+        return FALSE;
+    runtime_config_call.instruction = match;
+    if (!decode_relative_target(module, game->pe_size_of_image, runtime_config_call.instruction, 0xE8, &runtime_config_call.target)) {
+        return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_tw_session_tail_pattern, &match))
+        return FALSE;
+    start_session_tail.instruction = match + 13u;
+    if (!decode_relative_target(module, game->pe_size_of_image, start_session_tail.instruction, 0xE9, &start_session_tail.target)) {
+        return FALSE;
+    }
+
+    game->bootstrap.runtime_config_call = runtime_config_call;
+    game->bootstrap.start_session_tail = start_session_tail;
+    game->bootstrap.runtime_config_hook_kind = RUNTIME_CONFIG_HOOK_NOARG;
+    game->target_name = "Tiberium Wars (signature-resolved)";
+    return TRUE;
+}
+
+static BOOL resolve_bootstrap_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    GameLayout kw_game = *game;
+    GameLayout tw_game = *game;
+    BOOL kw_resolved = resolve_kw_bootstrap_sites(module, nt, &kw_game);
+    BOOL tw_resolved = resolve_tw_bootstrap_sites(module, nt, &tw_game);
+
+    /* Exactly one ABI-specific bootstrap must match; ambiguity is unsafe. */
+    if (kw_resolved == tw_resolved)
+        return FALSE;
+    *game = kw_resolved ? kw_game : tw_game;
+    return TRUE;
+}
+
+/* Section membership is checked before reading an indirect entry. Nothing in
+ * the protected routine or its dispatcher is patched or called by discovery. */
+static const IMAGE_SECTION_HEADER *section_for_span(IMAGE_NT_HEADERS32 *nt, u32 rva, u32 size, u32 flags)
+{
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    u16 i;
+    if (!size || rva >= nt->OptionalHeader.SizeOfImage || size > nt->OptionalHeader.SizeOfImage - rva)
+        return NULL;
+    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++section) {
+        u32 start = section->VirtualAddress;
+        u32 span = section->Misc.VirtualSize;
+        if ((section->Characteristics & flags) != flags || start >= nt->OptionalHeader.SizeOfImage || span > nt->OptionalHeader.SizeOfImage - start)
+            continue;
+        if (rva >= start && rva - start <= span && size <= span - (rva - start))
+            return section;
+    }
+    return NULL;
+}
+
+static BOOL resolve_protected_repeat_entry(u8 *module, IMAGE_NT_HEADERS32 *nt, u32 entry)
+{
+    const IMAGE_SECTION_HEADER *protected_section;
+    u32 slot, target, payload, dispatcher;
+    u32 image_size = nt->OptionalHeader.SizeOfImage;
+    /* This is an alternate native entry representation, not an arbitrary JMP
+     * exemption. The complete linked caller was already verified above. */
+    if (!section_for_span(nt, entry, 6u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE) || module[entry] != 0xFF || module[entry + 1u] != 0x25 ||
+        !read_absolute_rva(module, image_size, entry + 2u, &slot) || (slot & 3u) ||
+        !section_for_span(nt, slot, 4u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE) || !read_absolute_rva(module, image_size, slot, &target))
+        return FALSE;
+    protected_section = section_for_span(nt, target, 10u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE);
+    if (!protected_section || memcmp(protected_section->Name, ".securom", 8u) ||
+        section_for_span(nt, slot, 4u, IMAGE_SCN_MEM_READ) != protected_section || module[target] != 0x68 ||
+        !read_absolute_rva(module, image_size, target + 1u, &payload) || payload != target + 10u ||
+        !decode_relative_target(module, image_size, target + 5u, 0xE8, &dispatcher) || dispatcher == entry || dispatcher == target ||
+        section_for_span(nt, payload, 16u, IMAGE_SCN_MEM_READ) != protected_section ||
+        !section_for_span(nt, dispatcher, 6u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE) || module[dispatcher] != 0xFF ||
+        module[dispatcher + 1u] != 0x25 || !read_absolute_rva(module, image_size, dispatcher + 2u, &slot) || (slot & 3u) ||
+        !section_for_span(nt, slot, 4u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE) || !read_absolute_rva(module, image_size, slot, &target) ||
+        !section_for_span(nt, target, 1u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE) || target == entry || target == dispatcher ||
+        target == payload - 10u)
+        return FALSE;
+    return TRUE;
+}
+
+static BOOL resolve_keyboard_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    KeyboardLayout *keyboard = &game->keyboard;
+    u32 update, process_events, process_match;
+    if (!FIND_UNIQUE(module, nt, g_keyboard_update_pattern, &update) || !FIND_UNIQUE(module, nt, g_keyboard_process_pattern, &process_match))
+        return FALSE;
+    keyboard->input_frame_increment = update + 3u;
+    keyboard->hardware_poll.instruction = update + 9u;
+    if (!decode_relative_target(module, game->pe_size_of_image, keyboard->hardware_poll.instruction, 0xE8, &keyboard->hardware_poll.target) ||
+        !section_for_span(nt, keyboard->hardware_poll.target, 1u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE) ||
+        !decode_relative_target(module, game->pe_size_of_image, update + 17u, 0xE9, &process_events) || process_events != process_match)
+        return FALSE;
+    keyboard->check_repeat.instruction = process_events + 0x7Fu;
+    if (!decode_relative_target(module, game->pe_size_of_image, keyboard->check_repeat.instruction, 0xE8, &keyboard->check_repeat.target))
+        return FALSE;
+    if (section_for_span(nt, keyboard->check_repeat.target, ARRAY_COUNT(g_keyboard_repeat_body_pattern),
+                         IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE) &&
+        pattern_matches(module + keyboard->check_repeat.target, g_keyboard_repeat_body_pattern, ARRAY_COUNT(g_keyboard_repeat_body_pattern))) {
+        keyboard->repeat_entry_kind = KEYBOARD_REPEAT_NATIVE_BODY;
+        return TRUE;
+    }
+    if (!resolve_protected_repeat_entry(module, nt, keyboard->check_repeat.target))
+        return FALSE;
+    /* Keep the original logical entry. The native wrapper calls through it;
+     * it never unwraps/replaces the protected implementation or VM state. */
+    keyboard->repeat_entry_kind = KEYBOARD_REPEAT_PROTECTED_ENTRY;
+    return TRUE;
+}
+
+static BOOL resolve_camera_input_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    CameraInputLayout *camera = &game->camera_input;
+    u32 match;
+    u32 second_view_pointer;
+    u32 rotate_behavior_function;
+    u32 rotate_global_data_pointer;
+
+    /*
+     * The adjacent 24-byte held-zoom behaviors are an especially strong
+     * anchor: both load the same W3DView singleton and call slots 0x45/0x46.
+     * Mouse-wheel zoom has a separate caller and is intentionally not hooked.
+     */
+    if (!FIND_UNIQUE(module, nt, g_camera_zoom_behavior_pair_pattern, &match) ||
+        !read_absolute_rva(module, game->pe_size_of_image, match + 9u, &camera->w3d_view_pointer) ||
+        !read_absolute_rva(module, game->pe_size_of_image, match + 33u, &second_view_pointer) || second_view_pointer != camera->w3d_view_pointer) {
+        return FALSE;
+    }
+    camera->zoom_in_behavior_function = match;
+    camera->zoom_out_behavior_function = match + 24u;
+
+    if (!FIND_UNIQUE(module, nt, g_camera_rotate_behavior_pattern, &rotate_behavior_function) ||
+        !read_absolute_rva(module, game->pe_size_of_image, rotate_behavior_function + 8u, &rotate_global_data_pointer) ||
+        rotate_global_data_pointer != game->timing.global_data_pointer ||
+        !FIND_UNIQUE(module, nt, g_camera_scroll_by_pattern, &camera->scroll_by_function) ||
+        !FIND_UNIQUE(module, nt, g_camera_adjust_pattern, &match)) {
+        return FALSE;
+    }
+    camera->camera_adjust_instruction = match + 6u;
+
+    if (!FIND_UNIQUE(module, nt, g_camera_shake_pattern, &match))
+        return FALSE;
+    camera->shake_decay_operand = match + 27u;
+    if (!read_absolute_rva(module, game->pe_size_of_image, camera->shake_decay_operand, &camera->retail_shake_decay) ||
+        load_u32(module + camera->retail_shake_decay) != 0x3F400000u) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL resolve_visual_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    VisualLayout *visual = &game->visual;
+    u32 match;
+    u32 retail_step_address;
+
+    if (!FIND_UNIQUE(module, nt, g_camera_pattern, &match))
+        return FALSE;
+    visual->camera_step_operand = match + 11u;
+    if (!FIND_UNIQUE(module, nt, g_laser_pattern, &match))
+        return FALSE;
+    visual->laser_step_operand = match + 7u;
+    if (!FIND_UNIQUE(module, nt, g_model_pattern, &match))
+        return FALSE;
+    visual->model_step_operand = match + 17u;
+
+    if (!FIND_UNIQUE(module, nt, g_tracer_reset_pattern, &visual->tracer_reset_frame_call) ||
+        !FIND_UNIQUE(module, nt, g_tracer_update_pattern, &visual->tracer_update_frame_call) ||
+        !FIND_UNIQUE(module, nt, g_cloud_pattern, &visual->cloud_frame_call)) {
+        return FALSE;
+    }
+    if (!FIND_UNIQUE(module, nt, g_anim2d_set_pattern, &match))
+        return FALSE;
+    visual->anim2d_timestamp_frame_call = match + 10u;
+    if (!read_absolute_rva(module, game->pe_size_of_image, match + 6u, &game->timing.game_client_pointer) ||
+        (game->timing.game_client_pointer & 3u) ||
+        !section_for_span(nt, game->timing.game_client_pointer, 4u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE))
+        return FALSE;
+    if (!FIND_UNIQUE(module, nt, g_anim2d_update_pattern, &match))
+        return FALSE;
+    u32 client_pointer;
+    if (!read_absolute_rva(module, game->pe_size_of_image, match + 2u, &client_pointer) || client_pointer != game->timing.game_client_pointer)
+        return FALSE;
+    visual->anim2d_update_frame_call = match + 6u;
+
+    if (!FIND_UNIQUE(module, nt, g_particle_pattern, &match))
+        return FALSE;
+    visual->particle_simulation.instruction = match + 2u;
+    if (!decode_relative_target(module, game->pe_size_of_image, visual->particle_simulation.instruction, 0xE8, &visual->particle_simulation.target)) {
+        return FALSE;
+    }
+
+    if (!FIND_UNIQUE(module, nt, g_gpu_pattern, &match))
+        return FALSE;
+    visual->gpu_particle_fps_instruction = match + 5u;
+    visual->gpu_particle_fps_operand = match + 8u;
+    if (!read_absolute_rva(module, game->pe_size_of_image, visual->gpu_particle_fps_operand, &game->timing.client_fps) ||
+        game->timing.client_fps < 4u) {
+        return FALSE;
+    }
+    /* The two authoritative integer rates are adjacent: logic FPS then client FPS. */
+    game->timing.logic_fps = game->timing.client_fps - 4u;
+
+    if (!FIND_UNIQUE(module, nt, g_radius_cursor_throb_pattern, &match))
+        return FALSE;
+    visual->radius_cursor_fps_instruction = match + 20u;
+    visual->radius_cursor_fps_operand = match + 22u;
+    if (!read_absolute_rva(module, game->pe_size_of_image, visual->radius_cursor_fps_operand, &visual->retail_frames_per_millisecond) ||
+        !read_absolute_rva(module, game->pe_size_of_image, visual->camera_step_operand, &visual->retail_step)) {
+        return FALSE;
+    }
+
+    /* Camera, laser, and model must all name the same relocated retail scalar. */
+    retail_step_address = (u32)(uintptr_t)(module + visual->retail_step);
+    return load_u32(module + visual->laser_step_operand) == retail_step_address &&
+           load_u32(module + visual->model_step_operand) == retail_step_address;
+}
+
+static BOOL resolve_pacing_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    PacingLayout *pacing = &game->pacing;
+    u32 match;
+
+    if (!FIND_UNIQUE(module, nt, g_display_pattern, &match))
+        return FALSE;
+    pacing->display_limiter_branch = match + 3u;
+
+    if (!FIND_UNIQUE(module, nt, g_pacing_pattern, &match))
+        return FALSE;
+    pacing->limiter_interval_block = match + 25u;
+    if (!read_absolute_rva(module, game->pe_size_of_image, match + 13u, &pacing->enforce_limit_flag) ||
+        !read_absolute_rva(module, game->pe_size_of_image, match + 35u, &pacing->network_scale) ||
+        !read_absolute_rva(module, game->pe_size_of_image, match + 41u, &pacing->milliseconds_per_logic_frame) ||
+        !decode_relative_target(module, game->pe_size_of_image, match + 45u, 0xE8, &pacing->limiter_conversion_target)) {
+        return FALSE;
+    }
+
+    /* The display wait reads GlobalData; prove it is the same resolved cluster. */
+    if (!read_absolute_rva(module, game->pe_size_of_image, pacing->display_limiter_branch + 11u, &game->timing.global_data_pointer) ||
+        game->timing.global_data_pointer != pacing->enforce_limit_flag + 0x47u || pacing->enforce_limit_flag < 0x27u) {
+        return FALSE;
+    }
+
+    /*
+     * These globals form one fixed compiler-laid-out cluster in supported
+     * builds. Derive them from the signature-proven flag instead of adding
+     * several weak signatures for otherwise anonymous DWORDs.
+     */
+    game->timing.game_engine_pointer = pacing->enforce_limit_flag + 0x27u;
+    pacing->previous_frame_time_ms = pacing->enforce_limit_flag + 0x1Fu;
+    return TRUE;
+}
+
+static BOOL resolve_cached_timing_values(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    TimingLayout *timing = &game->timing;
+    u32 initializer;
+    u32 source_address = (u32)(uintptr_t)(module + timing->client_fps);
+
+    /* Follow startup initializers from authoritative g_clientUpdateFPS. */
+    if (!FIND_UNIQUE(module, nt, g_w3d_initializer_pattern, &initializer) || load_u32(module + initializer + 9u) != source_address ||
+        !read_absolute_rva(module, game->pe_size_of_image, initializer + 14u, &timing->w3d_milliseconds_per_frame)) {
+        return FALSE;
+    }
+    if (!find_signature_using_absolute_operand(module, nt, g_float_initializer_pattern, ARRAY_COUNT(g_float_initializer_pattern), 2u, source_address,
+                                               &initializer) ||
+        load_u32(module + initializer + 8u) != source_address ||
+        !read_absolute_rva(module, game->pe_size_of_image, initializer + 24u, &timing->client_fps_float)) {
+        return FALSE;
+    }
+    if (!find_signature_using_absolute_operand(module, nt, g_audio_initializer_pattern, ARRAY_COUNT(g_audio_initializer_pattern), 2u, source_address,
+                                               &initializer) ||
+        load_u32(module + initializer + 8u) != source_address ||
+        !read_absolute_rva(module, game->pe_size_of_image, initializer + 30u, &timing->audio_milliseconds_per_frame)) {
+        return FALSE;
+    }
+    /*
+     * Prove the radius operand names the FPS-derived cache by following its
+     * initializer. The cache's live value depends on initialization order and
+     * is intentionally not used as build identity.
+     */
+    if (!find_signature_using_absolute_operand(module, nt, g_frames_per_millisecond_initializer_pattern,
+                                               ARRAY_COUNT(g_frames_per_millisecond_initializer_pattern), 2u, source_address, &initializer) ||
+        load_u32(module + initializer + 8u) != source_address ||
+        load_u32(module + initializer + 30u) != (u32)(uintptr_t)(module + game->visual.retail_frames_per_millisecond)) {
+        return FALSE;
+    }
+
+    source_address = (u32)(uintptr_t)(module + timing->client_fps_float);
+    return find_signature_using_absolute_operand(module, nt, g_seconds_initializer_pattern, ARRAY_COUNT(g_seconds_initializer_pattern), 12u,
+                                                 source_address, &initializer) &&
+           read_absolute_rva(module, game->pe_size_of_image, initializer + 20u, &timing->visual_seconds_per_frame);
+}
+
+static BOOL resolve_audio_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    AudioLayout *audio = &game->audio;
+    static const u8 update_entry[] = {0x55, 0x8B, 0xEC, 0xA1};
+    u32 tail;
+    u32 expected_update;
+
+    if (!FIND_UNIQUE(module, nt, g_audio_update_tail_pattern, &tail) || tail < 0x12Au) {
+        return FALSE;
+    }
+    audio->update_function = tail - 0x12Au;
+    if (memcmp(module + audio->update_function, update_entry, sizeof(update_entry)) != 0) {
+        return FALSE;
+    }
+    expected_update = (u32)(uintptr_t)(module + audio->update_function);
+    u32 block;
+    static const u8 frame_prefix[] = {0x8B, 0x0D};
+    static const u8 getter_suffix[] = {0x85, 0xC9, 0x74, 0x68, 0x8B, 0x01, 0xFF, 0x50, 0x78};
+    if (!find_signature_using_absolute_operand(module, nt, g_audio_delta_pattern, ARRAY_COUNT(g_audio_delta_pattern), 36u,
+                                               (u32)(uintptr_t)(module + game->timing.audio_milliseconds_per_frame), &block) ||
+        block < 15u || memcmp(module + block - 15u, frame_prefix, 2) ||
+        load_u32(module + block - 13u) != (u32)(uintptr_t)(module + game->timing.game_client_pointer) ||
+        memcmp(module + block - 9u, getter_suffix, sizeof(getter_suffix)) || load_u32(module + block + 12u) != load_u32(module + block + 28u))
+        return FALSE;
+    audio->frame_delta_block = block;
+    memcpy(audio->frame_delta_expected, module + block, 43u);
+    return find_unique_readonly_pointer(module, nt, expected_update, &audio->update_vtable_entry);
+}
+
+static BOOL resolve_scheduler_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    SchedulerLayout *scheduler = &game->scheduler;
+    u32 match;
+    u32 client_fps_address = (u32)(uintptr_t)(module + game->timing.client_fps);
+    u32 logic_fps_address = (u32)(uintptr_t)(module + game->timing.logic_fps);
+
+    if (!FIND_UNIQUE(module, nt, g_phase_batch_pattern, &scheduler->phase_batch_block) ||
+        !FIND_UNIQUE(module, nt, g_phase_interpolation_pattern, &scheduler->phase_interpolation_function) ||
+        !FIND_UNIQUE(module, nt, g_client_slice_flush_pattern, &match) || load_u32(module + match + 1u) != client_fps_address ||
+        load_u32(module + match + 9u) != logic_fps_address) {
+        return FALSE;
+    }
+
+    /*
+     * GameLogic_UpdatePhase block layout (KW 1.02 Steam VA 0x005EF10F):
+     * +1  = &g_clientUpdateFPS, +9 = &g_logicFPS, +34 = CALL sub_6DE5B1.
+     * Proving both operands prevents an unrelated pair of integer divisions
+     * from being accepted as the phase-end flush.
+     */
+    scheduler->client_slice_flush.instruction = match + 34u;
+    return decode_relative_target(module, game->pe_size_of_image, scheduler->client_slice_flush.instruction, 0xE8,
+                                  &scheduler->client_slice_flush.target);
+}
+
+static BOOL resolve_w3d_clock_sites(u8 *module, IMAGE_NT_HEADERS32 *nt, GameLayout *game)
+{
+    W3DClockLayout *clock = &game->w3d_clock;
+    TimingLayout *timing = &game->timing;
+    u32 special;
+    u32 normal;
+    u32 accumulated;
+    u32 expected_step = (u32)(uintptr_t)(module + timing->w3d_milliseconds_per_frame);
+    u32 expected_accumulated;
+
+    if (!FIND_UNIQUE(module, nt, g_w3d_special_advance_pattern, &special) || !FIND_UNIQUE(module, nt, g_w3d_normal_advance_pattern, &normal) ||
+        !read_absolute_rva(module, game->pe_size_of_image, special + 1u, &accumulated)) {
+        return FALSE;
+    }
+
+    /*
+     * Special block: MOV EAX,[accum]; ADD EAX,[step]; PUSH EAX; MOV [accum],EAX.
+     * Normal block:  MOV EAX,[step]; IMUL EAX,ESI; ADD [accum],EAX; PUSH [accum].
+     * ESI is the client-frame delta in W3DDisplay_RenderAndPresentFrame.
+     */
+    expected_accumulated = (u32)(uintptr_t)(module + accumulated);
+    if (load_u32(module + special + 7u) != expected_step || load_u32(module + special + 13u) != expected_accumulated ||
+        load_u32(module + normal + 1u) != expected_step || load_u32(module + normal + 10u) != expected_accumulated ||
+        load_u32(module + normal + 16u) != expected_accumulated) {
+        return FALSE;
+    }
+
+    clock->special_advance_block = special;
+    clock->normal_advance_block = normal;
+    timing->w3d_accumulated_time_ms = accumulated;
+    return TRUE;
+}
+
+BOOL resolve_game_pacing_wait(const GameLayout *game, GamePacingWait *out_wait)
+{
+    IMAGE_NT_HEADERS32 *nt;
+    GamePacingWait wait;
+    u32 timer_target, interval_timer;
+    if (game == NULL || out_wait == NULL || !get_nt_headers(game->module, &nt) || nt->OptionalHeader.SizeOfImage != game->pe_size_of_image ||
+        !find_signature_using_absolute_operand(game->module, nt, g_pacing_wait_pattern, ARRAY_COUNT(g_pacing_wait_pattern), 17u,
+                                               (u32)(uintptr_t)(game->module + game->pacing.previous_frame_time_ms), &wait.loop) ||
+        load_u32(game->module + wait.loop + 27u) != (u32)(uintptr_t)(game->module + game->pacing.previous_frame_time_ms) ||
+        !read_absolute_rva(game->module, game->pe_size_of_image, wait.loop + 4u, &wait.sleep_import) ||
+        !section_for_span(nt, wait.sleep_import, sizeof(u32), IMAGE_SCN_MEM_READ) ||
+        section_for_span(nt, wait.sleep_import, sizeof(u32), IMAGE_SCN_MEM_EXECUTE) ||
+        !decode_relative_target(game->module, game->pe_size_of_image, wait.loop + 8u, 0xE8, &timer_target) ||
+        !section_for_span(nt, timer_target, 1u, IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE) || game->pacing.limiter_interval_block < 5u ||
+        !decode_relative_target(game->module, game->pe_size_of_image, game->pacing.limiter_interval_block - 5u, 0xE8, &interval_timer) ||
+        interval_timer != timer_target)
+        return FALSE;
+    wait.instruction = wait.loop + 2u;
+    *out_wait = wait;
+    return TRUE;
+}
+
+const char *game_resolve_stage_name(GameResolveStage stage)
+{
+    switch (stage) {
+    case GAME_STAGE_NONE:
+        return "complete";
+    case GAME_STAGE_PE:
+        return "PE headers";
+    case GAME_STAGE_BOOTSTRAP:
+        return "bootstrap";
+    case GAME_STAGE_KEYBOARD:
+        return "keyboard";
+    case GAME_STAGE_VISUAL:
+        return "visual";
+    case GAME_STAGE_PACING:
+        return "pacing";
+    case GAME_STAGE_CAMERA_INPUT:
+        return "camera input";
+    case GAME_STAGE_CACHED_TIMING:
+        return "cached timing";
+    case GAME_STAGE_AUDIO:
+        return "audio";
+    case GAME_STAGE_SCHEDULER:
+        return "scheduler";
+    case GAME_STAGE_W3D_CLOCK:
+        return "W3D clock";
+    case GAME_STAGE_RETAIL_RATES:
+        return "retail rates";
+    default:
+        return "unknown";
+    }
+}
+
+GameResolveResult resolve_game_layout_ex(GameLayout *out_game, u8 *module, GameResolveDiagnostic *diagnostic)
+{
+    IMAGE_NT_HEADERS32 *nt;
+    GameLayout game;
+    if (diagnostic != NULL)
+        diagnostic->stage = GAME_STAGE_PE;
+    if (out_game == NULL || !get_nt_headers(module, &nt))
+        return GAME_INVALID_PE;
+    memset(&game, 0, sizeof(game));
+    game.module = module;
+    game.pe_timestamp = nt->FileHeader.TimeDateStamp;
+    game.pe_entry_rva = nt->OptionalHeader.AddressOfEntryPoint;
+    game.pe_size_of_image = nt->OptionalHeader.SizeOfImage;
+
+    /* Dependencies are explicit: later groups prove their operands against
+     * globals from earlier groups. No image hash/address table is consulted. */
+#define RESOLVE_STAGE(stage_value, expression)                                                                                                       \
+    do {                                                                                                                                             \
+        if (diagnostic != NULL)                                                                                                                      \
+            diagnostic->stage = (stage_value);                                                                                                       \
+        if (!(expression))                                                                                                                           \
+            return GAME_UNSUPPORTED_BUILD;                                                                                                           \
+    } while (0)
+    RESOLVE_STAGE(GAME_STAGE_BOOTSTRAP, resolve_bootstrap_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_KEYBOARD, resolve_keyboard_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_VISUAL, resolve_visual_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_PACING, resolve_pacing_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_CAMERA_INPUT, resolve_camera_input_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_CACHED_TIMING, resolve_cached_timing_values(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_AUDIO, resolve_audio_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_SCHEDULER, resolve_scheduler_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_W3D_CLOCK, resolve_w3d_clock_sites(module, nt, &game));
+    RESOLVE_STAGE(GAME_STAGE_RETAIL_RATES, load_u32(module + game.timing.logic_fps) == 15u && load_u32(module + game.timing.client_fps) == 30u &&
+                                               module[game.pacing.display_limiter_branch] == 0x7D &&
+                                               module[game.pacing.display_limiter_branch + 1u] == 0x13);
+#undef RESOLVE_STAGE
+    *out_game = game;
+    if (diagnostic != NULL)
+        diagnostic->stage = GAME_STAGE_NONE;
+    return GAME_RESOLVED;
+}
+
+GameResolveResult resolve_game_layout(GameLayout *out_game, u8 *module)
+{
+    return resolve_game_layout_ex(out_game, module, NULL);
+}
+
+#undef FIND_UNIQUE
